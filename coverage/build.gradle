@@ -1,0 +1,179 @@
+import javax.management.remote.JMXConnectorFactory as JmxFactory
+import javax.management.remote.JMXServiceURL as JmxUrl
+
+buildscript {
+	dependencies {
+		classpath group: "com.liferay", name: "com.liferay.gradle.plugins.defaults", version: "latest.release"
+		classpath group: "org.kt3k.gradle.plugin", name: "coveralls-gradle-plugin", version: "2.6.3"
+	}
+
+	repositories {
+		mavenLocal()
+
+		maven {
+			url "https://cdn.lfrs.sl/repository.liferay.com/nexus/content/groups/public"
+		}
+
+		maven {
+			url "https://plugins.gradle.org/m2/"
+		}
+	}
+}
+
+apply plugin: "com.github.kt3k.coveralls"
+apply plugin: "com.liferay.app.defaults.plugin"
+apply plugin: "jacoco"
+
+task startJacocoRecording() {
+	doLast {
+		def file = new File("${rootDir}/build/jacoco/testIntegration.exec");
+
+		if (file.exists()) {
+			file.deleteOnExit();
+		}
+
+		file.getParentFile().mkdirs();
+
+		file.createNewFile();
+	}
+}
+
+allprojects {
+	apply plugin: "jacoco"
+
+	jacoco {
+		toolVersion = "0.7.9"
+	}
+
+	repositories {
+		mavenLocal()
+
+		maven {
+			url "https://cdn.lfrs.sl/repository.liferay.com/nexus/content/groups/public"
+		}
+	}
+}
+
+configure(subprojects.findAll {!it.childProjects}) {
+	apply plugin: "com.liferay.defaults.plugin"
+
+	task createJacocoTestIntegrationFile(type: Exec) {
+		commandLine 'touch', "${rootDir}/build/jacoco/testIntegration.exec"
+	}
+
+	task copyJacocoAgent(type: Copy) {
+		configurations.jacocoAgent.asFileTree.each {
+			from( zipTree(it) )
+		}
+		into "${rootDir}/build/jacoco"
+
+		finalizedBy createJacocoTestIntegrationFile
+	}
+
+	task createTempDir(type: Exec) {
+		commandLine 'mkdir', '-m', '777', '-p', "${rootDir}/build/deploy"
+	}
+
+	test {
+		ignoreFailures = false
+	}
+
+	testIntegration {
+		dependsOn createTempDir
+		dependsOn copyJacocoAgent
+
+		ignoreFailures = false
+		systemProperty "java.io.tmpdir", "${rootDir}/build/tmpdir"
+
+		testLogging {
+			events "started", "passed", "skipped", "failed", "standardOut", "standardError"
+			showExceptions true
+			exceptionFormat "full"
+			showCauses true
+			showStackTraces true
+		}
+	}
+
+	setUpTestableTomcat {
+		enabled = false
+	}
+
+	startTestableTomcat {
+		enabled = false
+	}
+
+	stopTestableTomcat {
+		enabled = false
+	}
+}
+
+task createTempDir(type: Exec) {
+	commandLine 'mkdir', '-m', '777', '-p', "${rootDir}/build/tmpdir"
+}
+
+task dumpJacoco {
+	doLast {
+		def serverUrl = 'service:jmx:rmi:///jndi/rmi://localhost:8099/jmxrmi'
+		String beanName = "org.jacoco:type=Runtime"
+		def server = JmxFactory.connect(new JmxUrl(serverUrl)).MBeanServerConnection
+		def gmxb = new GroovyMBean(server, beanName)
+
+		gmxb.dump(true)
+	}
+}
+
+task coverageReport(type: org.gradle.testing.jacoco.tasks.JacocoReport) {
+	dependsOn dumpJacoco
+
+	additionalSourceDirs = files(subprojects.findAll{!it.childProjects}.sourceSets.main.allSource.srcDirs)
+	sourceDirectories = files(subprojects.findAll{!it.childProjects}.sourceSets.main.allSource.srcDirs)
+	classDirectories =  files(subprojects.findAll{!it.childProjects}.sourceSets.main.output)
+
+	executionData = files("${rootDir}/build/jacoco/testIntegration.exec")
+
+	onlyIf = { true }
+
+	afterEvaluate {
+		classDirectories = files(classDirectories.files.collect {
+			fileTree(dir: it,
+					exclude: [
+							'**/constants/*',
+							'**/demo/*',
+							'**/exception/*Exception*',
+							'**/model/*Model*',
+							'**/model/*Soap*',
+							'**/model/*Wrapper*',
+							'**/model/impl/*BaseImpl*',
+							'**/model/impl/*CacheModel*',
+							'**/model/impl/*ModelImpl*',
+							'**/service/*ServiceUtil*',
+							'**/service/*ServiceWrapper*',
+							'**/service/base/*',
+							'**/service/http/*',
+							'**/service/persistence/*Util*',
+							'**/service/persistence/impl/*PersistenceImpl*',
+							'**/service/persistence/impl/*FinderBaseImpl*',
+							'**/service/util/*'
+					])
+		})
+	}
+
+	reports {
+		html.enabled = true
+		xml.enabled = true
+		xml.destination "${rootDir}/build/reports/jacoco/test/jacocoTestReport.xml"
+		csv.enabled = false
+	}
+
+	doFirst {
+		executionData = files(executionData.findAll { it.exists() })
+	}
+}
+
+tasks.coveralls {
+	dependsOn coverageReport
+}
+
+coveralls.sourceDirs = files(subprojects.findAll{!it.childProjects}.sourceSets.main.allSource.srcDirs).collect {
+	file -> file.absolutePath
+}
